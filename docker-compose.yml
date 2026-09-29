@@ -18,8 +18,8 @@ services:
 
   agent:
     build: .
-    ports:
-      - "8000:8000"
+    #ports:
+      #- "8000:8000"
     environment:
       # Nội suy từ .env cùng thư mục — KHÔNG hardcode secret
       - AGENT_API_KEY=${AGENT_API_KEY}
