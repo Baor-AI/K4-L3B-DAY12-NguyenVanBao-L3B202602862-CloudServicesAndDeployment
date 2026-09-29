@@ -1,34 +1,52 @@
 # ═══════════════════════════════════════════════════════════════════
-# CP2 — Containerization
-#
-# Dưới đây là Dockerfile "chạy được nhưng chưa production": một stage,
-# chạy bằng user root, không có health check, base image nặng.
-#
-# NHIỆM VỤ: sửa file này thành bản production-ready. Yêu cầu:
-#   [ ] Multi-stage build: stage `builder` cài dependency, stage runtime
-#       chỉ copy kết quả sang → image nhỏ hơn, không mang theo compiler.
-#       Cú pháp: `FROM python:3.11-slim AS builder`
-#   [ ] Base image slim (hoặc alpine), không dùng `python:3.11` bản đầy đủ
-#   [ ] COPY requirements.txt và pip install TRƯỚC khi COPY source code
-#       (Docker cache theo layer: sửa 1 dòng code không phải cài lại thư viện)
-#   [ ] Tạo user thường và chuyển sang bằng lệnh `USER` — container chạy
-#       root nghĩa là ai thoát được khỏi app cũng thành root trên host
-#   [ ] Có `HEALTHCHECK` gọi vào endpoint /health
-#   [ ] Đọc cổng từ biến môi trường PORT (cloud tự gán cổng, không cố định 8000)
-#
-# Kiểm tra:  pytest tests/test_cp2.py -v
-# Build thử: docker build -t day12-agent:prod .
-#            docker images day12-agent:prod     # xem dung lượng
+# CP2 — Dockerfile production-ready (multi-stage)
 # ═══════════════════════════════════════════════════════════════════
 
-FROM python:3.11
+# ─────────────────────────────────────────────────────────────
+# Stage 1: builder — cài dependency vào /root/.local
+# ─────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-COPY . .
+# Copy requirements TRƯỚC source → tận dụng Docker layer cache
+COPY requirements.txt .
 
-RUN pip install -r requirements.txt
+# Cài vào --user (không cần root ở stage runtime)
+RUN pip install --no-cache-dir --user -r requirements.txt
 
+
+# ─────────────────────────────────────────────────────────────
+# Stage 2: runtime — image gọn, non-root, có healthcheck
+# ─────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+# Tạo user thường — không chạy root
+RUN useradd --create-home --shell /bin/bash appuser
+
+# Copy dependency đã cài từ builder sang
+COPY --from=builder /root/.local /home/appuser/.local
+
+# PATH để python tìm thấy uvicorn/pip packages trong ~/.local
+ENV PATH=/home/appuser/.local/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8000
+
+# Copy source code với quyền của appuser
+COPY --chown=appuser:appuser . .
+
+# Chuyển sang non-root
+USER appuser
+
+# Cloud tự gán $PORT; local mặc định 8000
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Healthcheck gọi /health — dùng python có sẵn, không cần curl
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ[\"PORT\"]}/health').read()" || exit 1
+
+# Exec form — signal (SIGTERM) đi thẳng vào uvicorn, không bị sh chặn
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
